@@ -7,7 +7,6 @@ message_map = {}
 
 class LoggingServiceServicer(logging_pb2_grpc.LoggingServiceServicer):
     def LogMessage(self, request, context):
-        # Deduplication: перевірка чи UUID вже існує
         if request.uuid not in message_map:
             message_map[request.uuid] = request.msg
             print(f"[gRPC] Збережено: {request.msg} (UUID: {request.uuid})")
