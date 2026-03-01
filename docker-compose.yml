@@ -1,0 +1,14 @@
+version: '3.8'
+services:
+  hazelcast1:
+    image: hazelcast/hazelcast:5.3
+    ports: ["5701:5701"]
+  hazelcast2:
+    image: hazelcast/hazelcast:5.3
+    ports: ["5702:5701"]
+  hazelcast3:
+    image: hazelcast/hazelcast:5.3
+    ports: ["5703:5701"]
+  management-center:
+    image: hazelcast/management-center:5.3
+    ports: ["8080:8080"]
