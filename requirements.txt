@@ -6,3 +6,5 @@ grpcio-tools
 tenacity
 pytest
 pytest-asyncio
+hazelcast-python-client
+psycopg2-binary
