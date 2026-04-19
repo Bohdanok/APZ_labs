@@ -49,6 +49,15 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
 
+  config-server:
+    build:
+      context: ./config-server
+    container_name: config_server
+    networks:
+      - micro-net
+    ports:
+      - "8080:8000"
+
   logging-service-1:
     build:
       context: .
@@ -56,10 +65,13 @@ services:
     container_name: ls1
     environment:
       - HZ_NODES=hz1:5701,hz2:5701,hz3:5701
+      - CONFIG_SERVER=http://config-server:8000
+      - ADVERTISED_URL=http://ls1:8000
     networks:
       - micro-net
     depends_on:
       - hazelcast1
+      - config-server
 
   logging-service-2:
     build:
@@ -68,10 +80,13 @@ services:
     container_name: ls2
     environment:
       - HZ_NODES=hz1:5701,hz2:5701,hz3:5701
+      - CONFIG_SERVER=http://config-server:8000
+      - ADVERTISED_URL=http://ls2:8000
     networks:
       - micro-net
     depends_on:
       - hazelcast2
+      - config-server
 
   logging-service-3:
     build:
@@ -80,10 +95,13 @@ services:
     container_name: ls3
     environment:
       - HZ_NODES=hz1:5701,hz2:5701,hz3:5701
+      - CONFIG_SERVER=http://config-server:8000
+      - ADVERTISED_URL=http://ls3:8000
     networks:
       - micro-net
     depends_on:
       - hazelcast3
+      - config-server
 
   counter-service:
     build:
@@ -95,10 +113,14 @@ services:
       - DB_USER=user
       - DB_PASS=password
       - DB_NAME=messages_db
+      - HZ_NODES=hz1:5701,hz2:5701,hz3:5701
+      - CONFIG_SERVER=http://config-server:8000
+      - ADVERTISED_URL=http://cs:8000
     networks:
       - micro-net
     depends_on:
       - postgres
+      - config-server
 
   facade-service:
     build:
@@ -108,10 +130,12 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - LOGGING_NODES=http://ls1:8000,http://ls2:8000,http://ls3:8000
-      - MESSAGES_URL=http://cs:8000/message
+      - CONFIG_SERVER=http://config-server:8000
+      - HZ_NODES=hz1:5701,hz2:5701,hz3:5701
     networks:
       - micro-net
+    depends_on:
+      - config-server
 
 volumes:
   pgdata:
