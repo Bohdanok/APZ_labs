@@ -1,0 +1,68 @@
+# Headless Service so each Hazelcast pod gets a stable DNS hostname
+# (hazelcast-0.hazelcast-headless, hazelcast-1..., hazelcast-2...).
+apiVersion: v1
+kind: Service
+metadata:
+  name: hazelcast-headless
+  namespace: apz-lab5
+spec:
+  clusterIP: None
+  selector:
+    app: hazelcast
+  ports:
+    - name: hz
+      port: 5701
+      targetPort: 5701
+---
+# Regular Service (load-balanced ClusterIP) - used by clients that just need
+# any one member, not for the cluster itself.
+apiVersion: v1
+kind: Service
+metadata:
+  name: hazelcast
+  namespace: apz-lab5
+spec:
+  selector:
+    app: hazelcast
+  ports:
+    - port: 5701
+      targetPort: 5701
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: hazelcast
+  namespace: apz-lab5
+spec:
+  serviceName: hazelcast-headless
+  replicas: 3
+  selector:
+    matchLabels:
+      app: hazelcast
+  template:
+    metadata:
+      labels:
+        app: hazelcast
+    spec:
+      containers:
+        - name: hazelcast
+          image: hazelcast/hazelcast:5.3
+          ports:
+            - containerPort: 5701
+          env:
+            - name: HZ_PHONE_HOME_ENABLED
+              value: "false"
+            - name: JAVA_OPTS
+              value: "-Dhazelcast.config=/opt/hazelcast/config_ext/hazelcast.yaml"
+          volumeMounts:
+            - name: hzconfig
+              mountPath: /opt/hazelcast/config_ext
+          readinessProbe:
+            tcpSocket:
+              port: 5701
+            initialDelaySeconds: 10
+            periodSeconds: 5
+      volumes:
+        - name: hzconfig
+          configMap:
+            name: hazelcast-config

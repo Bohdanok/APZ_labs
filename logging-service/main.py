@@ -1,57 +1,63 @@
-from fastapi import FastAPI
-from pydantic import BaseModel
-from fastapi.responses import PlainTextResponse
-import hazelcast
-import httpx
 import os
+import socket
 import asyncio
+import hazelcast
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import PlainTextResponse
+from pydantic import BaseModel
 
 app = FastAPI()
 
-hz_nodes = os.getenv("HZ_NODES", "hz1:5701,hz2:5701,hz3:5701").split(",")
-CONFIG_SERVER = os.getenv("CONFIG_SERVER", "http://config-server:8000")
-SERVICE_NAME = "logging-service"
-ADVERTISED_URL = os.getenv("ADVERTISED_URL", "http://localhost:8000")
+INSTANCE_ID = os.environ.get("HOSTNAME", socket.gethostname())
 
-try:
-    client = hazelcast.HazelcastClient(cluster_members=hz_nodes, cluster_name="dev")
-    message_map = client.get_map("messages_map").blocking()
-except Exception as e:
-    print(f"Не вдалося підключитись до Hazelcast: {e}")
-    message_map = None
+HZ_NODES = [n.strip() for n in os.environ["HZ_NODES"].split(",")]
+HZ_CLUSTER_NAME = os.environ["HZ_CLUSTER_NAME"]
+HZ_MAP_NAME = os.environ["HZ_MAP_NAME"]
 
-async def register_with_config_server():
-    async with httpx.AsyncClient() as client:
-        while True:
-            try:
-                await client.post(
-                    f"{CONFIG_SERVER}/register",
-                    json={"service_name": SERVICE_NAME, "address": ADVERTISED_URL}
-                )
-                print(f"Успішно зареєстровано {ADVERTISED_URL} в config-server")
-                break
-            except httpx.RequestError:
-                print("Очікування config-server...")
-                await asyncio.sleep(3)
+hz_client = None
+message_map = None
+
 
 @app.on_event("startup")
-async def startup_event():
-    asyncio.create_task(register_with_config_server())
+async def startup():
+    global hz_client, message_map
+    print(f"[logging:{INSTANCE_ID}] config -> HZ_NODES={HZ_NODES} cluster={HZ_CLUSTER_NAME} map={HZ_MAP_NAME}",
+          flush=True)
+    for i in range(20):
+        try:
+            hz_client = hazelcast.HazelcastClient(
+                cluster_members=HZ_NODES, cluster_name=HZ_CLUSTER_NAME
+            )
+            message_map = hz_client.get_map(HZ_MAP_NAME).blocking()
+            print(f"[logging:{INSTANCE_ID}] connected to Hazelcast", flush=True)
+            return
+        except Exception as e:
+            print(f"[logging:{INSTANCE_ID}] HZ retry {i}: {e}", flush=True)
+            await asyncio.sleep(3)
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok", "instance": INSTANCE_ID}
+
 
 class LogMessage(BaseModel):
     uuid: str
     msg: str
 
+
 @app.post("/log")
 async def log_message(data: LogMessage):
-    if message_map:
-        message_map.put(data.uuid, data.msg)
-    print(f"Отримано повідомлення: {data.msg} з UUID: {data.uuid}")
-    return {"status": "success"}
+    if message_map is None:
+        raise HTTPException(503, "hazelcast unavailable")
+    message_map.put(data.uuid, data.msg)
+    print(f"[logging:{INSTANCE_ID}] stored {data.uuid} -> {data.msg}", flush=True)
+    return {"status": "success", "instance": INSTANCE_ID}
+
 
 @app.get("/log", response_class=PlainTextResponse)
 async def get_logs():
-    if not message_map:
-        return "Hazelcast недоступний"
-    values = message_map.values()
-    return ", ".join(values) if values else "Немає повідомлень"
+    if message_map is None:
+        return "Hazelcast unavailable"
+    values = list(message_map.values())
+    return ", ".join(values) if values else "No messages"

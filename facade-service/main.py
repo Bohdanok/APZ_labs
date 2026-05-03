@@ -1,89 +1,102 @@
+import os
+import uuid
+import json
+import asyncio
+import time
+import socket
+import httpx
+import hazelcast
 from fastapi import FastAPI, Body, HTTPException
 from fastapi.responses import PlainTextResponse
-import uuid
-import httpx
-import os
-import random
-import hazelcast
-import json
 
 app = FastAPI()
 
-CONFIG_SERVER = os.getenv("CONFIG_SERVER", "http://config-server:8000")
-hz_nodes = os.getenv("HZ_NODES", "hz1:5701,hz2:5701,hz3:5701").split(",")
+INSTANCE_ID = os.environ.get("HOSTNAME", socket.gethostname())
 
-try:
-    hz_client = hazelcast.HazelcastClient(cluster_members=hz_nodes, cluster_name="dev")
-    counter_queue = hz_client.get_queue("messages_queue").blocking()
-except Exception as e:
-    print(f"Hazelcast setup failed: {e}")
-    counter_queue = None
+LOGGING_SERVICE_URL = os.environ["LOGGING_SERVICE_URL"]
+COUNTER_SERVICE_URL = os.environ["COUNTER_SERVICE_URL"]
+HZ_NODES = [n.strip() for n in os.environ["HZ_NODES"].split(",")]
+HZ_CLUSTER_NAME = os.environ["HZ_CLUSTER_NAME"]
+MQ_QUEUE_NAME = os.environ["MQ_QUEUE_NAME"]
 
-async def get_service_urls(service_name: str):
-    async with httpx.AsyncClient() as client:
+hz_client = None
+counter_queue = None
+
+
+@app.on_event("startup")
+async def startup():
+    global hz_client, counter_queue
+    print(f"[facade:{INSTANCE_ID}] config -> LOGGING={LOGGING_SERVICE_URL} COUNTER={COUNTER_SERVICE_URL} "
+          f"HZ_NODES={HZ_NODES} HZ_CLUSTER={HZ_CLUSTER_NAME} MQ={MQ_QUEUE_NAME}", flush=True)
+    for i in range(20):
         try:
-            resp = await client.get(f"{CONFIG_SERVER}/services/{service_name}", timeout=3.0)
-            resp.raise_for_status()
-            return resp.json()
-        except httpx.RequestError:
-            return []
+            hz_client = hazelcast.HazelcastClient(
+                cluster_members=HZ_NODES, cluster_name=HZ_CLUSTER_NAME
+            )
+            counter_queue = hz_client.get_queue(MQ_QUEUE_NAME).blocking()
+            print(f"[facade:{INSTANCE_ID}] connected to MQ", flush=True)
+            return
+        except Exception as e:
+            print(f"[facade:{INSTANCE_ID}] MQ retry {i}: {e}", flush=True)
+            await asyncio.sleep(3)
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok", "instance": INSTANCE_ID}
+
 
 @app.post("/facade")
 async def post_facade(msg: str = Body(..., embed=True)):
     msg_uuid = str(uuid.uuid4())
     payload = {"uuid": msg_uuid, "msg": msg}
-    
-    # 1. Sync HTTP POST to Logging Service (via Registry)
-    logging_nodes = await get_service_urls("logging-service")
-    if not logging_nodes:
-        raise HTTPException(status_code=503, detail="logging-service недоступний")
-    
-    random.shuffle(logging_nodes)
-    success = False
+
+    t0 = time.perf_counter()
+    log_pod = "?"
     async with httpx.AsyncClient() as client:
-        for node in logging_nodes:
+        try:
+            r = await client.post(f"{LOGGING_SERVICE_URL}/log", json=payload, timeout=2.0)
+            if r.status_code != 200:
+                raise HTTPException(503, f"logging-service returned {r.status_code}")
             try:
-                await client.post(f"{node}/log", json=payload, timeout=2.0)
-                success = True
-                break
-            except httpx.RequestError:
-                continue
+                log_pod = r.json().get("instance", "?")
+            except Exception:
+                pass
+        except httpx.RequestError as e:
+            raise HTTPException(503, f"logging-service unreachable: {e}")
+    log_dt = time.perf_counter() - t0
 
-    if not success:
-        raise HTTPException(status_code=503, detail="Всі екземпляри logging-service недоступні")
+    t1 = time.perf_counter()
+    if counter_queue is None:
+        raise HTTPException(500, "MQ unavailable")
+    counter_queue.put(json.dumps({"msg": msg}))
+    mq_dt = time.perf_counter() - t1
 
-    # 2. Async Message Queue to Counter Service
-    if counter_queue:
-        counter_queue.put(json.dumps({"msg": msg}))
-    else:
-        raise HTTPException(status_code=500, detail="Черга повідомлень недоступна")
+    print(f"[facade:{INSTANCE_ID}] uuid={msg_uuid} logging_pod={log_pod} "
+          f"log_dt={log_dt*1000:.1f}ms mq_dt={mq_dt*1000:.1f}ms", flush=True)
+    return {
+        "status": "ok",
+        "uuid": msg_uuid,
+        "facade_instance": INSTANCE_ID,
+        "logging_pod": log_pod,
+        "log_ms": round(log_dt * 1000, 2),
+        "mq_ms": round(mq_dt * 1000, 2),
+    }
 
-    return {"status": "ok", "uuid": msg_uuid}
 
 @app.get("/facade", response_class=PlainTextResponse)
 async def get_facade():
-    logging_nodes = await get_service_urls("logging-service")
-    counter_nodes = await get_service_urls("counter-service")
-    
-    log_response_text = "Логи недоступні"
+    log_text = "logs unavailable"
+    msg_text = "null"
     async with httpx.AsyncClient() as client:
-        if logging_nodes:
-            random.shuffle(logging_nodes)
-            for node in logging_nodes:
-                try:
-                    resp = await client.get(f"{node}/log", timeout=2.0)
-                    log_response_text = resp.text
-                    break
-                except httpx.RequestError:
-                    continue
-        
-        msg_text = "null" # Graceful fallback if counter is down
-        if counter_nodes:
-            try:
-                # Assuming 1 counter service for GET read
-                msg_response = await client.get(f"{counter_nodes[0]}/message", timeout=2.0)
-                msg_text = msg_response.text
-            except httpx.RequestError:
-                pass
-        
-    return f"{log_response_text} | Рахунок: {msg_text}"
+        try:
+            r = await client.get(f"{LOGGING_SERVICE_URL}/log", timeout=2.0)
+            log_text = r.text
+        except httpx.RequestError:
+            pass
+        try:
+            r = await client.get(f"{COUNTER_SERVICE_URL}/message", timeout=2.0)
+            msg_text = r.text
+        except httpx.RequestError:
+            pass
+    return f"facade={INSTANCE_ID} | logs=[{log_text}] | counter=[{msg_text}]"

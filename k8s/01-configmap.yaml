@@ -1,0 +1,54 @@
+# Config Server: all dynamic settings live here, services read them as env vars.
+# Hazelcast nodes, Message-Queue name, DB host/port/name and the URLs of the
+# logging-service / counter-service Kubernetes Services are stored centrally.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+  namespace: apz-lab5
+data:
+  # Hazelcast cluster (req. 3 - logging-service uses these)
+  HZ_NODES: "hazelcast-0.hazelcast-headless.apz-lab5.svc.cluster.local:5701,hazelcast-1.hazelcast-headless.apz-lab5.svc.cluster.local:5701,hazelcast-2.hazelcast-headless.apz-lab5.svc.cluster.local:5701"
+  HZ_CLUSTER_NAME: "dev"
+  HZ_MAP_NAME: "messages_map"
+  # Message Queue (req. 4 - facade-service + counter-service use these)
+  MQ_QUEUE_NAME: "messages_queue"
+  # Postgres
+  DB_HOST: "postgres.apz-lab5.svc.cluster.local"
+  DB_PORT: "5432"
+  DB_NAME: "messages_db"
+  # K8s service DNS - this is how facade discovers the other two services
+  # (req. 2 - no static address in code or app config; addresses come from K8s)
+  LOGGING_SERVICE_URL: "http://logging-service.apz-lab5.svc.cluster.local:8000"
+  COUNTER_SERVICE_URL: "http://counter-service.apz-lab5.svc.cluster.local:8000"
+---
+# Hazelcast member config consumed by the Hazelcast pods themselves.
+# tcp-ip discovery via StatefulSet pod DNS — no multicast, no extra plugins.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hazelcast-config
+  namespace: apz-lab5
+data:
+  hazelcast.yaml: |
+    hazelcast:
+      cluster-name: dev
+      network:
+        port:
+          port: 5701
+          auto-increment: false
+        join:
+          multicast:
+            enabled: false
+          tcp-ip:
+            enabled: true
+            member-list:
+              - hazelcast-0.hazelcast-headless.apz-lab5.svc.cluster.local
+              - hazelcast-1.hazelcast-headless.apz-lab5.svc.cluster.local
+              - hazelcast-2.hazelcast-headless.apz-lab5.svc.cluster.local
+      map:
+        messages_map:
+          backup-count: 1
+      queue:
+        messages_queue:
+          backup-count: 1

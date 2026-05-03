@@ -1,92 +1,97 @@
-from fastapi import FastAPI
-from pydantic import BaseModel
-from fastapi.responses import PlainTextResponse
-import psycopg2
 import os
-import hazelcast
-import httpx
-import asyncio
-import threading
+import socket
+import time
 import json
+import threading
+import psycopg2
+import hazelcast
+from fastapi import FastAPI
+from fastapi.responses import PlainTextResponse
 
 app = FastAPI()
 
-CONFIG_SERVER = os.getenv("CONFIG_SERVER", "http://config-server:8000")
-SERVICE_NAME = "counter-service"
-ADVERTISED_URL = os.getenv("ADVERTISED_URL", "http://localhost:8000")
-hz_nodes = os.getenv("HZ_NODES", "hz1:5701,hz2:5701,hz3:5701").split(",")
+INSTANCE_ID = os.environ.get("HOSTNAME", socket.gethostname())
+
+HZ_NODES = [n.strip() for n in os.environ["HZ_NODES"].split(",")]
+HZ_CLUSTER_NAME = os.environ["HZ_CLUSTER_NAME"]
+MQ_QUEUE_NAME = os.environ["MQ_QUEUE_NAME"]
+DB_HOST = os.environ["DB_HOST"]
+DB_PORT = int(os.environ.get("DB_PORT", "5432"))
+DB_NAME = os.environ["DB_NAME"]
+DB_USER = os.environ["DB_USER"]
+DB_PASSWORD = os.environ["DB_PASSWORD"]
 
 hz_client = None
 counter_queue = None
 
+
 def get_db_connection():
     return psycopg2.connect(
-        host=os.getenv("DB_HOST", "postgres"),
-        database=os.getenv("DB_NAME", "messages_db"),
-        user=os.getenv("DB_USER", "user"),
-        password=os.getenv("DB_PASS", "password")
+        host=DB_HOST, port=DB_PORT, database=DB_NAME,
+        user=DB_USER, password=DB_PASSWORD,
     )
 
-import time
 
 def init_db():
-    max_retries = 5
-    for i in range(max_retries):
+    for i in range(20):
         try:
             with get_db_connection() as conn:
                 with conn.cursor() as cur:
-                    cur.execute("""
-                        CREATE TABLE IF NOT EXISTS messages (
-                            id SERIAL PRIMARY KEY,
-                            msg TEXT NOT NULL
-                        )
-                    """)
+                    cur.execute(
+                        "CREATE TABLE IF NOT EXISTS messages "
+                        "(id SERIAL PRIMARY KEY, msg TEXT NOT NULL)"
+                    )
                     conn.commit()
-            print("Таблицю messages успішно ініціалізовано.")
-            return # Exit the loop if successful
+            print(f"[counter:{INSTANCE_ID}] DB ready", flush=True)
+            return
         except Exception as e:
-            print(f"Помилка ініціалізації БД (спроба {i+1}/{max_retries}): {e}")
-            time.sleep(3) # Wait 3 seconds before trying again
+            print(f"[counter:{INSTANCE_ID}] DB init retry {i}: {e}", flush=True)
+            time.sleep(3)
+
 
 def queue_listener():
-    print("Запуск слухача черги Hazelcast...")
+    print(f"[counter:{INSTANCE_ID}] queue listener started", flush=True)
     while True:
         try:
-            if counter_queue:
-                msg = counter_queue.take()
-                parsed_msg = json.loads(msg)
-                with get_db_connection() as conn:
-                    with conn.cursor() as cur:
-                        cur.execute("INSERT INTO messages (msg) VALUES (%s)", (parsed_msg['msg'],))
-                        conn.commit()
-                print(f"Збережено з черги: {parsed_msg['msg']}")
+            if counter_queue is None:
+                time.sleep(1)
+                continue
+            raw = counter_queue.take()
+            parsed = json.loads(raw)
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("INSERT INTO messages (msg) VALUES (%s)", (parsed["msg"],))
+                    conn.commit()
+            print(f"[counter:{INSTANCE_ID}] persisted msg='{parsed['msg']}'", flush=True)
         except Exception as e:
-            print(f"Помилка обробки повідомлення з черги: {e}")
+            print(f"[counter:{INSTANCE_ID}] queue err: {e}", flush=True)
+            time.sleep(1)
 
-async def register_with_config_server():
-    async with httpx.AsyncClient() as client:
-        while True:
-            try:
-                await client.post(
-                    f"{CONFIG_SERVER}/register",
-                    json={"service_name": SERVICE_NAME, "address": ADVERTISED_URL}
-                )
-                print("Успішно зареєстровано в config-server")
-                break
-            except httpx.RequestError:
-                await asyncio.sleep(3)
 
 @app.on_event("startup")
-async def startup_event():
+def startup():
     global hz_client, counter_queue
+    print(f"[counter:{INSTANCE_ID}] config -> HZ_NODES={HZ_NODES} cluster={HZ_CLUSTER_NAME} "
+          f"queue={MQ_QUEUE_NAME} DB={DB_HOST}:{DB_PORT}/{DB_NAME}", flush=True)
     init_db()
-    asyncio.create_task(register_with_config_server())
-    try:
-        hz_client = hazelcast.HazelcastClient(cluster_members=hz_nodes, cluster_name="dev")
-        counter_queue = hz_client.get_queue("messages_queue").blocking()
-        threading.Thread(target=queue_listener, daemon=True).start()
-    except Exception as e:
-        print(f"Hazelcast connection error: {e}")
+    for i in range(20):
+        try:
+            hz_client = hazelcast.HazelcastClient(
+                cluster_members=HZ_NODES, cluster_name=HZ_CLUSTER_NAME
+            )
+            counter_queue = hz_client.get_queue(MQ_QUEUE_NAME).blocking()
+            threading.Thread(target=queue_listener, daemon=True).start()
+            print(f"[counter:{INSTANCE_ID}] connected to MQ", flush=True)
+            return
+        except Exception as e:
+            print(f"[counter:{INSTANCE_ID}] MQ retry {i}: {e}", flush=True)
+            time.sleep(3)
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok", "instance": INSTANCE_ID}
+
 
 @app.get("/message", response_class=PlainTextResponse)
 async def get_message():
@@ -94,8 +99,7 @@ async def get_message():
         with get_db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT COUNT(*) FROM messages")
-                count = cur.fetchone()[0]
-                return f"Total messages in DB: {count}"
+                cnt = cur.fetchone()[0]
+                return f"Total messages in DB: {cnt} (served by {INSTANCE_ID})"
     except Exception as e:
-        return "DB connection error"
-    
+        return f"DB connection error: {e}"
