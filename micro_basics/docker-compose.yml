@@ -1,0 +1,50 @@
+services:
+  logging-service:
+    build:
+      context: .
+      args:
+        SERVICE: logging_service
+        PORT: "8001"
+    image: micro-basics/logging-service
+    container_name: logging-service
+    environment:
+      SERVICE: logging_service
+      PORT: "8001"
+      PYTHONUNBUFFERED: "1"
+    ports:
+      - "8001:8001"
+
+  counter-service:
+    build:
+      context: .
+      args:
+        SERVICE: counter_service
+        PORT: "8002"
+    image: micro-basics/counter-service
+    container_name: counter-service
+    environment:
+      SERVICE: counter_service
+      PORT: "8002"
+      PYTHONUNBUFFERED: "1"
+    ports:
+      - "8002:8002"
+
+  facade-service:
+    build:
+      context: .
+      args:
+        SERVICE: facade_service
+        PORT: "8000"
+    image: micro-basics/facade-service
+    container_name: facade-service
+    environment:
+      SERVICE: facade_service
+      PORT: "8000"
+      LOGGING_URL: "http://logging-service:8001"
+      COUNTER_URL: "http://counter-service:8002"
+      PYTHONUNBUFFERED: "1"
+    ports:
+      - "8000:8000"
+    depends_on:
+      - logging-service
+      - counter-service
