@@ -1,5 +1,3 @@
-version: "3.8"
-
 networks:
   micro-net:
     driver: bridge
@@ -8,30 +6,24 @@ services:
   hazelcast1:
     image: hazelcast/hazelcast:5.3
     container_name: hz1
-    networks:
-      - micro-net
-    ports:
-      - "5701:5701"
+    networks: [micro-net]
+    ports: ["5701:5701"]
     environment:
       - HZ_CLUSTERNAME=dev
 
   hazelcast2:
     image: hazelcast/hazelcast:5.3
     container_name: hz2
-    networks:
-      - micro-net
-    ports:
-      - "5702:5701"
+    networks: [micro-net]
+    ports: ["5702:5701"]
     environment:
       - HZ_CLUSTERNAME=dev
 
   hazelcast3:
     image: hazelcast/hazelcast:5.3
     container_name: hz3
-    networks:
-      - micro-net
-    ports:
-      - "5703:5701"
+    networks: [micro-net]
+    ports: ["5703:5701"]
     environment:
       - HZ_CLUSTERNAME=dev
 
@@ -42,76 +34,70 @@ services:
       POSTGRES_USER: user
       POSTGRES_PASSWORD: password
       POSTGRES_DB: messages_db
-    ports:
-      - "5432:5432"
-    networks:
-      - micro-net
+    ports: ["5432:5432"]
+    networks: [micro-net]
     volumes:
       - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d messages_db"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
 
   logging-service-1:
-    build:
-      context: .
-      dockerfile: ./logging-service/Dockerfile
+    build: { context: ., dockerfile: ./logging-service/Dockerfile }
     container_name: ls1
     environment:
       - HZ_NODES=hz1:5701,hz2:5701,hz3:5701
-    networks:
-      - micro-net
-    depends_on:
-      - hazelcast1
+      - INSTANCE_ID=ls1
+      - PYTHONUNBUFFERED=1
+    networks: [micro-net]
+    depends_on: [hazelcast1, hazelcast2, hazelcast3]
 
   logging-service-2:
-    build:
-      context: .
-      dockerfile: ./logging-service/Dockerfile
+    build: { context: ., dockerfile: ./logging-service/Dockerfile }
     container_name: ls2
     environment:
       - HZ_NODES=hz1:5701,hz2:5701,hz3:5701
-    networks:
-      - micro-net
-    depends_on:
-      - hazelcast2
+      - INSTANCE_ID=ls2
+      - PYTHONUNBUFFERED=1
+    networks: [micro-net]
+    depends_on: [hazelcast1, hazelcast2, hazelcast3]
 
   logging-service-3:
-    build:
-      context: .
-      dockerfile: ./logging-service/Dockerfile
+    build: { context: ., dockerfile: ./logging-service/Dockerfile }
     container_name: ls3
     environment:
       - HZ_NODES=hz1:5701,hz2:5701,hz3:5701
-    networks:
-      - micro-net
-    depends_on:
-      - hazelcast3
+      - PYTHONUNBUFFERED=1
+      - INSTANCE_ID=ls3
+    networks: [micro-net]
+    depends_on: [hazelcast1, hazelcast2, hazelcast3]
 
   counter-service:
-    build:
-      context: .
-      dockerfile: ./counter-service/Dockerfile
+    build: { context: ., dockerfile: ./counter-service/Dockerfile }
     container_name: cs
     environment:
       - DB_HOST=postgres
       - DB_USER=user
       - DB_PASS=password
       - DB_NAME=messages_db
-    networks:
-      - micro-net
+      - PYTHONUNBUFFERED=1
+    networks: [micro-net]
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
 
   facade-service:
-    build:
-      context: .
-      dockerfile: ./facade-service/Dockerfile
+    build: { context: ., dockerfile: ./facade-service/Dockerfile }
     container_name: fs
-    ports:
-      - "8000:8000"
+    ports: ["8000:8000"]
     environment:
       - LOGGING_NODES=http://ls1:8000,http://ls2:8000,http://ls3:8000
-      - MESSAGES_URL=http://cs:8000/message
-    networks:
-      - micro-net
+      - COUNTER_URL=http://cs:8000
+      - PYTHONUNBUFFERED=1
+    networks: [micro-net]
+    depends_on: [logging-service-1, logging-service-2, logging-service-3, counter-service]
 
 volumes:
   pgdata:

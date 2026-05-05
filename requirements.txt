@@ -1,10 +1,6 @@
 fastapi
 uvicorn
 httpx
-grpcio
-grpcio-tools
-tenacity
-pytest
-pytest-asyncio
+pydantic
 hazelcast-python-client
-psycopg2-binary
+asyncpg
